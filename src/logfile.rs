@@ -1,194 +1,282 @@
-use std::path::Path;
+use std::fmt::Debug;
+use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+//use std::fs::File;
+//use std::io::{BufRead, ErrorKind, Seek, SeekFrom};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 
-use iced::{
-    alignment::Vertical,
-    futures::channel::mpsc::{channel as iced_channel, Receiver},
-    widget::{
-        container, scrollable::{self, AbsoluteOffset, Id, Properties, RelativeOffset}, text::LineHeight, Column, Container, Row, Scrollable, Text
-    },
-    Background, Color, Element, Length, Padding, Pixels, Task,
-};
+use egui::{Label, ScrollArea, TextBuffer, TextEdit, Widget};
+use egui_extras::{TableBuilder, Column};
 
-use crate::{reader, Message};
+use notify::event::{MetadataKind, ModifyKind};
+use notify::{EventKind, RecursiveMode, Watcher};
+use serde::{Deserialize, Serialize};
+use crate::{MAX_FILE_SIZE, Error};
 
-const ADDITIONAL_OFFSET: f32 = 2.0;
+use tokio::io::{BufReader, SeekFrom, AsyncSeekExt, AsyncBufReadExt, ErrorKind};
+use tokio::fs::File;
 
-#[derive(Debug, Clone)]
+use log::{error, debug};
+
+#[derive(Serialize, Deserialize)]
 pub struct LogFile {
-    pub id: Id,
     pub filename: String,
+    pub path: PathBuf,
+    pub filter: String,
+    #[serde(skip)]
     pub lines: Vec<String>,
-    visible_start: usize,
-    visible_end: usize,
+    #[serde(skip)]
+    receiver: Option<Receiver<Vec<String>>>,
     item_height: f32,
-    offset: f32,
-    items_per_page: usize,
-}
-
-#[derive(Debug, Clone)]
-pub enum LogFileMessage {
-    ScrollChanged(scrollable::Viewport),
-    ViewportResized { width: u32, height: u32 },
-    SetItemHeight(f32),
-    NewData(Vec<String>),
 }
 
 impl LogFile {
-    pub fn create_receiver(&self) -> Receiver<Message> {
-        let (sender, receiver) = iced_channel(100);
-        let file_path = self.filename.clone();
+    // TODO: Change receiver type to Result<Vec<String>, ReadError>?
+    pub fn create_receiver(&self, ctx: egui::Context) -> Receiver<Vec<String>> {
+        let (sender, receiver) = channel();
+        let file_path = self.path.clone();
 
-        let _ = smol::spawn(async move {
-            if let Err(e) = reader(Path::new(&file_path.clone()), sender).await {
+        tokio::spawn(async move {
+            if let Err(e) = reader(file_path.as_path(), sender, ctx).await {
                 // TODO: Actual error handling
-                eprintln!("Unable to do things with logfile: {e:?}, {:?}", e.source());
+                error!("Unable to do things with logfile: {e:?}, {:?}", e.source());
             }
-        })
-        .detach();
+        });
 
         receiver
     }
-}
 
-impl LogFile {
-    pub fn new(filename: String, items: Vec<String>, item_height: f32) -> Self {
+    pub fn new(path: PathBuf, items: Vec<String>, item_height: f32) -> Self {
         Self {
-            id: Id::new(format!("logfile_{}_{:?}", filename, Id::unique())),
-            filename,
+            filename: path.to_string_lossy().to_string(), 
+            path,
+            filter: String::new(),
             lines: items,
-            visible_start: 0,
-            visible_end: 0,
-            item_height,
-            offset: 0.0,
-            items_per_page: 100,
+            receiver: None,
+            item_height
         }
     }
 
-    pub fn scroll(&self) -> Task<LogFileMessage> {
-        scrollable::scroll_to(self.id.clone(), AbsoluteOffset {
-            ..Default::default()
-        })
-    }
+    pub fn ui(&mut self, ui: &mut egui::Ui) {
+        // TODO: Read channel and push data
+        if let Some(receiver) = &self.receiver {
+            loop {
+                let res = receiver.try_recv();
 
-    pub fn snap_to_end(&mut self) -> Task<LogFileMessage> {
-        if self.items_per_page > 0 && !self.lines.is_empty() {
-            self.visible_end = self.lines.len();
-            self.visible_start = self.visible_end.saturating_sub(self.items_per_page);
-        }
+                match res {
+                    Ok(v) => {
+                        for l in v {
+                            self.lines.push(l);
+                        }
+                    },
+                    Err(e) => {
+                        match e {
+                            TryRecvError::Empty => (),
+                            TryRecvError::Disconnected => {
+                                self.receiver = None;
+                                self.lines.clear();
+                            }
+                        };
 
-        scrollable::snap_to(self.id.clone(), RelativeOffset { x: 0.0, y: 1.0 })
-    }
-
-    pub fn update(&mut self, message: LogFileMessage) -> Task<LogFileMessage> {
-        match message {
-            LogFileMessage::ScrollChanged(viewport) => {
-                println!("Recalculating.");
-
-                let bounds = viewport.bounds();
-
-                self.items_per_page = ((bounds.height / self.item_height) + ADDITIONAL_OFFSET).ceil() as usize;
-
-                self.offset = viewport.absolute_offset().y;
-                self.visible_start = (self.offset / self.item_height) as usize;
-
-                self.visible_end = self.visible_start.saturating_add(self.items_per_page);
-
-                if self.visible_end > self.lines.len() {
-                    self.visible_end = self.lines.len();
-                    self.visible_start = self.visible_end.saturating_sub(self.items_per_page);
+                        break;
+                    },
                 }
-
-                Task::none()
-            },
-            LogFileMessage::NewData(data) => {
-                for line in data {
-                    self.lines.push(line);
-                }
-
-                // TODO: If not set to follow, don't snap.
-                self.snap_to_end()
-            },
-            LogFileMessage::ViewportResized {
-                width: _,
-                height: _,
-            } => {
-                // TODO: Trigger something so that we can recalculate viewport.
-                //scrollable::snap_to(self.id.clone(), RelativeOffset { x: 0.0, y: 1.0 })
-                // TODO: If set to follow:
-                self.snap_to_end()
-            },
-            LogFileMessage::SetItemHeight(new_height) => {
-                self.item_height = new_height;
-
-                Task::none()
             }
-        }
-    }
-
-    pub fn view(&self) -> Element<LogFileMessage> {
-        let vis_end = if self.visible_end == 0 && !self.lines.is_empty() {
-            50
         } else {
-            self.visible_end
+            self.receiver = Some(self.create_receiver(ui.ctx().clone()));
+        }
+
+        /*
+        let filtered = if self.filter.is_empty() {
+            self.lines
+        } else {
+            let f = self.filter.as_str();
+            self.lines.iter().filter(|l| l.contains(f)).map(String::to_owned).collect::<Vec<String>>()
         };
+        */
+        let filtered = self.lines.as_slice();
 
-        let style_black = container::Style::default()
-            .with_background(Background::Color(Color::new(0.3, 0.3, 0.3, 0.2)));
-        let style_white = container::Style::default()
-            .with_background(Background::Color(Color::new(1.0, 1.0, 1.0, 0.0)));
+        // TODO: Table or roll our own inside ScrollArea?
+        if false {
+            const SCROLLBAR_HEIGHT: f32 = 16.0;
 
-        println!("first {}, last {}", self.visible_start, vis_end);
-        let visible_items: Vec<Element<_>> = self.lines[self.visible_start..vis_end]
-            .iter()
-            .enumerate()
-            .map(move |(idx, item)| {
-                let index = idx.clone();
-
-                Container::new(
-                    Text::new(item.clone())
-                        .size(self.item_height * 0.7)
-                        .line_height(LineHeight::Absolute(Pixels(self.item_height)))
-                        .vertical_alignment(Vertical::Center)
-                        .height(Length::Fixed(self.item_height)),
-                )
-                .style(move |_| {
-                    if index % 2 == 0 {
-                        style_black.clone()
-                    } else {
-                        style_white.clone()
-                    }
-                })
-                .padding(Padding {
-                    top: 0.0,
-                    left: self.item_height * 0.5,
-                    bottom: 0.0,
-                    right: self.item_height * 0.5
-                })
-                .into()
-            })
-            .collect();
-
-        let content = Column::with_children(visible_items)
-            .height(Length::Fixed((self.lines.len() as f32) * self.item_height))
-            .padding(Padding {
-                top: ((self.visible_start as f32) * self.item_height),
-                left: 0.0,
-                right: 0.0,
-                bottom: 0.0,
+            ScrollArea::horizontal().auto_shrink([false, true])
+                .max_height(ui.available_height() - SCROLLBAR_HEIGHT)
+                .show(ui, |ui| {
+                    let height = ui.available_height();
+                    TableBuilder::new(ui)
+                        .stick_to_bottom(true)
+                        .striped(true)
+                        .column(Column::remainder())
+                        .auto_shrink([false, false])
+                        .max_scroll_height(height - SCROLLBAR_HEIGHT)
+                        .body(|body| {
+                            body.rows(self.item_height, filtered.len(), |mut row| {
+                                let row_index = row.index();
+                                row.col(|ui| {
+                                    Label::new(self.lines.get(row_index).unwrap_or(&String::from("")))
+                                        .wrap_mode(egui::TextWrapMode::Extend)
+                                        .ui(ui);
+                                    });
+                            })
+                        });
+                });
+        } else {
+            ui.vertical(|ui| {
+                ScrollArea::both()
+                    .auto_shrink([false, true])
+                    .stick_to_bottom(true)
+                    .max_height(ui.available_height() - 32.0)
+                    .show_rows(ui, self.item_height, filtered.len(), |ui, row_range| {
+                        for row_index in row_range {
+                            Label::new(self.lines.get(row_index).unwrap_or(&String::from("")))
+                                .wrap_mode(egui::TextWrapMode::Extend)
+                                .ui(ui);
+                            }
+                    });
             });
+        }
 
-        let scrollable = Scrollable::with_direction(
-            content,
-            scrollable::Direction::Both {
-                vertical: Properties::default(),
-                horizontal: Properties::default(),
-            },
-        )
-        .id(self.id.clone())
-        .on_scroll(|v| LogFileMessage::ScrollChanged(v))
-        //.height(Length::Shrink)
-        .width(Length::Fill);
-
-        scrollable.into()
+        ui.horizontal(|ui| {
+            ui.horizontal(|ui| {
+                ui.label("Filter");
+                TextEdit::singleline(&mut self.filter).show(ui);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Highlight");
+                TextEdit::singleline(&mut String::new()).show(ui);
+            })
+        });
     }
 }
+
+impl Debug for LogFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!("LogFile {}", self.filename))
+    }
+}
+
+async fn init_reader(file_path: &Path) -> Result<BufReader<File>, Error> {
+    let file = File::open(file_path).await?;
+
+    let mut reader = BufReader::new(file);
+
+    let meta = tokio::fs::metadata(file_path).await?;
+    //let meta = std::fs::metadata(file_path)?;
+
+    if meta.len() > MAX_FILE_SIZE {
+        let _ = reader.seek(SeekFrom::End(-(MAX_FILE_SIZE as i64))).await?;
+        // TODO: debug!("File 2 big, only reading last MAX_FILE_SIZE bytes");
+        let mut l = Vec::new();
+        let _ = reader.read_until(b'\n', &mut l).await?;
+        // TODO: debug!("Skipping until next new line.");
+    }
+
+    Ok(reader)
+}
+
+async fn read_data_from_file(reader: &mut BufReader<File>) -> Result<Vec<String>, Error> {
+    let mut read_data = Vec::new();
+    loop {
+        let mut l = String::new();
+        let bytes_read = reader.read_line(&mut l).await?;
+
+        if bytes_read == 0 {
+            break;
+        }
+
+        read_data.push(l);
+    }
+
+    Ok(read_data)
+}
+
+async fn reader(file_path: &Path, output: Sender<Vec<String>>, ctx: egui::Context) -> Result<(), Error> {
+    //let file_path = Path::new("log.txt");
+    let filename = file_path.to_string_lossy();
+    // TODO: Verify that file exists
+
+    debug!("Reading from {filename}");
+
+    if let Err(e) = std::fs::metadata(&file_path) {
+        match e.kind() {
+            ErrorKind::NotFound => {
+                // TODO: Have a look anyway?
+                return Err("Unable to find the specified file.".into());
+            }
+            _ => (),
+        }
+    }
+
+    let mut reader = init_reader(&file_path).await?;
+
+    // TODO: Implement way to choose between recommended and poll?
+
+    let (tx, rx) = channel();
+    let mut watcher = notify::recommended_watcher(move |res| {
+        match res {
+            Ok(event) => {
+                match tx.send(event) {
+                    Ok(_) => (),
+                    Err(e) => panic!("Unable to send event: {e:?}"),
+                };
+            }
+            Err(e) => panic!("Unable to watch file: {e:?}"),
+        };
+    })?;
+
+    watcher.watch(
+        file_path.to_path_buf().parent().unwrap_or(Path::new(".")),
+        RecursiveMode::NonRecursive,
+    )?;
+
+    let preexisting_data = read_data_from_file(&mut reader).await?;
+
+    if !preexisting_data.is_empty() {
+        output
+            .send(preexisting_data)?;
+    }
+
+    while let Ok(evt) = rx.recv() {
+        if evt
+            .paths
+            .iter()
+            .filter_map(|p| p.file_name())
+            .filter(|s| s == &file_path.file_name().unwrap_or(OsStr::new("")))
+            .collect::<Vec<_>>()
+            .is_empty()
+        {
+            continue;
+        }
+
+        match evt.kind {
+            EventKind::Create(_) => {
+                reader = init_reader(&file_path).await?;
+            }
+            EventKind::Modify(kind) => {
+                match kind {
+                    ModifyKind::Data(_) => {
+                        let data = read_data_from_file(&mut reader).await?;
+
+                        if !data.is_empty() {
+                            output
+                                .send(data)?;
+                            ctx.request_repaint();
+                        }
+                    }
+                    ModifyKind::Metadata(k) => {
+                        if k == MetadataKind::Any {
+                            // When watching a file directly, these event can mean that a file has
+                            // been deleted.
+                        }
+                    }
+                    _ => (),
+                }
+            }
+            _ => (),
+        }
+    }
+
+    Ok(())
+}
+
