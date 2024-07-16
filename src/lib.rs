@@ -1,33 +1,122 @@
-use std::{collections::VecDeque, fmt::Debug, path::{Path, PathBuf}, sync::mpsc::{channel, Receiver, Sender}};
+use std::{
+    collections::VecDeque,
+    fmt::{Debug, Display},
+    path::PathBuf,
+    sync::mpsc::{channel, Receiver, Sender},
+};
 
 use log::{debug, error};
 
-use egui::{CentralPanel, TopBottomPanel};
+use eframe::egui::{self, CentralPanel, TopBottomPanel};
 use egui_tiles::{Behavior, Container, SimplificationOptions, Tile, Tiles, Tree, UiResponse};
 use serde::{Deserialize, Serialize};
 
 pub const APPLICATION_NAME: &str = "LogTool";
 pub const IS_WEB: bool = cfg!(target_arch = "wasm32");
 
-pub type Error = Box<dyn std::error::Error + Send + Sync>;
+// TODO: Enum for commonly handled error types?
 
-const MAX_FILE_SIZE: u64 = (1024 * 1024 * 1024) * 50;
+#[derive(Debug)]
+pub enum Error {
+    Io(tokio::io::Error),
+    // Skip for now, makes for annoying type dependencies
+    //Send(std::sync::mpsc::SendError<LogFileMessage>),
+    Receive(std::sync::mpsc::RecvError),
+    Notify(notify::Error),
+    Other(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl From<tokio::io::Error> for Error {
+    fn from(value: tokio::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+/*
+impl From<std::sync::mpsc::SendError<LogFileMessage>> for Error {
+    fn from(value: std::sync::mpsc::SendError<LogFileMessage>) -> Self {
+        Self::Send(value)
+    }
+}
+*/
+
+impl From<std::sync::mpsc::RecvError> for Error {
+    fn from(value: std::sync::mpsc::RecvError) -> Self {
+        Self::Receive(value)
+    }
+}
+
+impl From<notify::Error> for Error {
+    fn from(value: notify::Error) -> Self {
+        Self::Notify(value)
+    }
+}
+
+impl From<&str> for Error {
+    fn from(value: &str) -> Self {
+        Self::Other(value.into())
+    }
+}
+
+impl From<String> for Error {
+    fn from(value: String) -> Self {
+        Self::Other(value.into())
+    }
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => std::fmt::Display::fmt(&e, f),
+            //Self::Send(e) => std::fmt::Display::fmt(e, f),
+            Self::Receive(e) => std::fmt::Display::fmt(e, f),
+            Self::Notify(e) => std::fmt::Display::fmt(e, f),
+            Self::Other(e) => std::fmt::Display::fmt(e, f),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn cause(&self) -> Option<&dyn std::error::Error> {
+        /*
+        match self {
+            Self::IoError(e) => Some(e),
+            Self::Other(e) => Some(e)
+        }
+        */
+        None
+    }
+
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        None
+    }
+
+    fn description(&self) -> &str {
+        match self {
+            Self::Io(_e) => "IO Error",
+            //Self::Send(_e) => "Channel Send error",
+            Self::Receive(_e) => "Channel Receive error",
+            Self::Notify(_e) => "FS Notify error",
+            Self::Other(_e) => "Unknown error"
+        }
+    }
+}
+
 const MAX_RECENT_FILES: usize = 20;
-const DEFAULT_ROW_SIZE: f32 = 18.0;
 
 pub mod logfile;
 
-use logfile::LogFile;
+use logfile::{LogFile, LogFileMessage};
 
 #[derive(Serialize, Deserialize)]
 pub enum TabPane {
-    LogFile(LogFile)
+    LogFile(LogFile),
 }
 
 impl TabPane {
-    pub fn ui(&mut self, ui: &mut egui::Ui) -> egui_tiles::UiResponse {
+    pub fn ui(&mut self, ui: &mut eframe::egui::Ui) -> egui_tiles::UiResponse {
         match self {
-            Self::LogFile(f) => f.ui(ui)
+            Self::LogFile(f) => f.ui(ui),
         }
 
         UiResponse::None
@@ -44,7 +133,7 @@ impl Debug for TabPane {
 
 #[derive(Debug)]
 pub enum Message {
-    FilesPicked(Vec<PathBuf>)
+    FilesPicked(Vec<PathBuf>),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -66,16 +155,12 @@ pub struct MessageChannel {
 impl Default for MessageChannel {
     fn default() -> Self {
         let (sender, receiver) = channel();
-        Self {
-            sender,
-            receiver,
-        }
+        Self { sender, receiver }
     }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct TabBehaviour {
-}
+pub struct TabBehaviour {}
 
 impl Behavior<TabPane> for TabBehaviour {
     fn tab_title_for_pane(&mut self, pane: &TabPane) -> egui::WidgetText {
@@ -84,19 +169,40 @@ impl Behavior<TabPane> for TabBehaviour {
         }
     }
 
-    fn pane_ui(&mut self, ui: &mut egui::Ui, _tile_id: egui_tiles::TileId, pane: &mut TabPane) -> UiResponse {
+    fn pane_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        _tile_id: egui_tiles::TileId,
+        pane: &mut TabPane,
+    ) -> UiResponse {
         pane.ui(ui)
     }
 
     fn simplification_options(&self) -> SimplificationOptions {
-        let mut opts = SimplificationOptions::default();
-        opts.all_panes_must_have_tabs = true;
-        opts.prune_empty_tabs = true;
-
-        opts
+        SimplificationOptions {
+            all_panes_must_have_tabs: true,
+            ..Default::default()
+        }
     }
 
     fn is_tab_closable(&self, _tiles: &Tiles<TabPane>, _tile_id: egui_tiles::TileId) -> bool {
+        true
+    }
+
+    fn on_tab_close(&mut self, tiles: &mut Tiles<TabPane>, tile_id: egui_tiles::TileId) -> bool {
+        if let Some(tile) = tiles.get(tile_id) {
+            match tile {
+                Tile::Pane(tab_pane) => match tab_pane {
+                    TabPane::LogFile(lfile) => {
+                        if let Some(thread) = lfile.thread.as_ref() {
+                            thread.abort();
+                        }
+                    }
+                },
+                _ => (),
+            }
+        }
+
         true
     }
 }
@@ -133,7 +239,6 @@ impl LogTool {
         let id = self.tree.tiles.insert_pane(tab);
 
         if let Some(root_tile_id) = self.tree.root() {
-
             // TODO: Use global size for lines?
             match self.tree.tiles.get_mut(root_tile_id) {
                 Some(Tile::Container(root_tile)) => {
@@ -144,7 +249,7 @@ impl LogTool {
                         Container::Tabs(r) => r.set_active(id),
                         _ => (),
                     }
-                },
+                }
                 Some(Tile::Pane(_)) => (),
                 None => (),
             }
@@ -161,7 +266,7 @@ impl Default for LogTool {
             tree: Self::create_tree(),
             messages: MessageChannel::default(),
             recent_files: VecDeque::new(),
-            behaviour: TabBehaviour { },
+            behaviour: TabBehaviour {},
         }
     }
 }
@@ -182,13 +287,42 @@ impl eframe::App for LogTool {
                 Message::FilesPicked(files) => {
                     debug!("{files:?}");
                     for path in files {
-                        self.add_tile(TabPane::LogFile(LogFile::new(path.clone(), Vec::new(), DEFAULT_ROW_SIZE)));
+                        let mut matching_tile = None;
+
+                        for (id, tile) in self.tree.tiles.iter() {
+                            match tile {
+                                Tile::Pane(pane) => match pane {
+                                    TabPane::LogFile(file) => {
+                                        if file.path == path {
+                                            matching_tile = Some(id.clone());
+                                        }
+                                    }
+                                },
+                                Tile::Container(_) => (),
+                            }
+                        }
+
+                        match matching_tile {
+                            Some(id) => {
+                                self.tree.make_active(|t_id, _t| id == t_id);
+                            }
+                            None => {
+                                self.add_tile(TabPane::LogFile(LogFile::new(
+                                    path.clone(),
+                                    Vec::new(),
+                                )));
+                            }
+                        }
 
                         // TODO: Move from whatever position to front
                         if !self.recent_files.contains(&path) {
                             self.recent_files.push_front(path);
                         } else {
-                            let filtered = self.recent_files.iter().filter(|p| p != &&path).map(|p| p.to_owned());
+                            let filtered = self
+                                .recent_files
+                                .iter()
+                                .filter(|p| p != &&path)
+                                .map(|p| p.to_owned());
                             self.recent_files = VecDeque::from_iter(filtered);
                             self.recent_files.push_front(path);
                         }
@@ -216,13 +350,16 @@ impl eframe::App for LogTool {
                         if ui.button("Open File").clicked() {
                             let file_sender = self.messages.sender.clone();
 
+                            let dialog = rfd::AsyncFileDialog::new().set_parent(_frame);
+
                             tokio::spawn(async move {
-                                if let Some(files) = rfd::AsyncFileDialog::new().pick_files().await {
+                                if let Some(files) = dialog.pick_files().await {
                                     if let Err(e) = file_sender.send(Message::FilesPicked(
-                                            files
+                                        files
                                             .into_iter()
                                             .map(|f| f.path().to_owned())
-                                            .collect::<Vec<PathBuf>>())) {
+                                            .collect::<Vec<PathBuf>>(),
+                                    )) {
                                         // TODO: Error handling
                                         error!("Unable to send to message channel: {e:?}")
                                     }
@@ -241,7 +378,11 @@ impl eframe::App for LogTool {
                             ui.menu_button("Recent files", |ui| {
                                 for file in &self.recent_files {
                                     if ui.button(file.to_string_lossy().to_string()).clicked() {
-                                        if let Err(e) = self.messages.sender.send(Message::FilesPicked(vec![file.to_owned()])) {
+                                        if let Err(e) = self
+                                            .messages
+                                            .sender
+                                            .send(Message::FilesPicked(vec![file.to_owned()]))
+                                        {
                                             // TODO: Error handling
                                             error!("Unable to send message to channel: {e:?}");
                                         }

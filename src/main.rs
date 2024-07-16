@@ -5,16 +5,19 @@ use logtool::LogTool;
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     if let None = std::env::var_os("RUST_LOG") {
-        std::env::set_var("RUST_LOG", "debug");
+        std::env::set_var("RUST_LOG", "info");
     }
 
     env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
 
-    let rt = tokio::runtime::Runtime::new().expect("Unable to create tokio runtime");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Unable to create tokio runtime");
     let _enter = rt.enter();
 
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+        viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([400.0, 300.0])
             .with_min_inner_size([300.0, 220.0])
             .with_icon(
