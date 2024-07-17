@@ -11,7 +11,10 @@ use eframe::egui::{self, CentralPanel, TopBottomPanel};
 use egui_tiles::{Behavior, Container, SimplificationOptions, Tile, Tiles, Tree, UiResponse};
 use serde::{Deserialize, Serialize};
 
-pub const APPLICATION_NAME: &str = "LogTool";
+pub mod logfile;
+use logfile::LogFile;
+
+pub const APPLICATION_NAME: &str = "LogGlance";
 pub const IS_WEB: bool = cfg!(target_arch = "wasm32");
 
 // TODO: Enum for commonly handled error types?
@@ -104,9 +107,6 @@ impl std::error::Error for Error {
 
 const MAX_RECENT_FILES: usize = 20;
 
-pub mod logfile;
-
-use logfile::{LogFile, LogFileMessage};
 
 #[derive(Serialize, Deserialize)]
 pub enum TabPane {

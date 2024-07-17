@@ -1,11 +1,9 @@
 [package]
-name = "logtool"
+name = "logglance"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Get egui from eframe
-#egui = { version = "0.28.1", features = ["accesskit", "serde"] }
 egui_extras = { version = "0.28.1", features = ["serde"] }
 eframe = { version = "0.28.1", default-features = false, features = [
     "accesskit",     # Make egui comptaible with screen readers. NOTE: adds a lot of dependencies.
@@ -32,4 +30,9 @@ env_logger = "0.11"
 # web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"
+
+[profile.dev]
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 3
 

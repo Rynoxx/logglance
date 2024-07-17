@@ -148,6 +148,7 @@ impl Search {
         self.string.is_empty()
     }
 
+    // TODO: I'm not very fond of this way of doing it. See if we can find a rustier way to do it.
     fn create_regex(&self) -> Result<Regex, regex::Error> {
         let regex_pattern = if self.is_regex {
             &self.string
@@ -156,6 +157,7 @@ impl Search {
         };
 
         RegexBuilder::new(&regex_pattern)
+            .unicode(true)
             .case_insensitive(self.case_insensitive)
             .build()
     }
@@ -185,8 +187,6 @@ impl Search {
                 additional_content(ui);
             });
         });
-
-        //let data_changed = txt_changed || regex_checkbox_changed || case_checkbox_changed;
 
         self.changed = (!self.string.is_empty() && self.regex.is_none()) || data_changed;
 
@@ -974,3 +974,147 @@ async fn reader(
     Ok(())
 }
 
+#[cfg(test)]
+mod test {
+    // TODO: Make code more test-able
+    // TODO: Some tests for the file-reading parts and the RowModifier::generate_line
+    use super::{Filter, Search};
+
+    #[test]
+    pub fn test_filter_casesensitive() {
+        let lines = vec![
+            String::from("This is a line, it shouldn't match the filter"),
+            String::from("This is a line which should match the filter."),
+            String::from("This is a line Which shouldn't match the filter."),
+            String::from("Another line which the filter should match."),
+        ];
+
+        let expected_lines = vec![
+            String::from("This is a line which should match the filter."),
+            String::from("Another line which the filter should match."),
+        ];
+
+        let mut filter = Filter {
+            filter: true,
+            search: Search {
+                changed: false,
+                regex: None,
+                string: String::from("which"),
+                is_regex: false,
+                case_insensitive: false,
+            },
+            changed: false,
+        };
+
+        filter.search.regex = Some(filter.search.create_regex().expect("Should result in a valid regex"));
+
+        let filtered_lines = filter.filter(&lines).expect("Result should've been filtered");
+
+        assert_eq!(filtered_lines, expected_lines);
+        assert_ne!(filtered_lines, lines);
+    }
+
+    #[test]
+    pub fn test_filter_caseinsensitive() {
+        let lines = vec![
+            String::from("This is a line, it shouldn't match the filter"),
+            String::from("This is a line which should match the filter."),
+            String::from("This is a line Which should match the filter."),
+            String::from("Another line which the filter should match."),
+        ];
+
+        let expected_lines = vec![
+            String::from("This is a line which should match the filter."),
+            String::from("This is a line Which should match the filter."),
+            String::from("Another line which the filter should match."),
+        ];
+
+        let mut filter = Filter {
+            filter: true,
+            search: Search {
+                changed: false,
+                regex: None,
+                string: String::from("which"),
+                is_regex: false,
+                case_insensitive: true,
+            },
+            changed: false,
+        };
+
+        filter.search.regex = Some(filter.search.create_regex().expect("Should result in a valid regex"));
+
+        let filtered_lines = filter.filter(&lines).expect("Result should've been filtered");
+
+        assert_eq!(filtered_lines, expected_lines);
+        assert_ne!(filtered_lines, lines);
+    }
+
+    #[test]
+    pub fn test_filter_regex_caseinsensitive() {
+        let lines = vec![
+            String::from("This is a line, it shouldn't match the filter"),
+            String::from("This is a line which should match the filter."),
+            String::from("This is a line Which should match the filter."),
+            String::from("Another line which the filter should match."),
+        ];
+
+        let expected_lines = vec![
+            String::from("This is a line which should match the filter."),
+            String::from("This is a line Which should match the filter."),
+            String::from("Another line which the filter should match."),
+        ];
+
+        let mut filter = Filter {
+            filter: true,
+            search: Search {
+                changed: false,
+                regex: None,
+                string: String::from(r#"(which|should\b)"#),
+                is_regex: true,
+                case_insensitive: true,
+            },
+            changed: false,
+        };
+
+        filter.search.regex = Some(filter.search.create_regex().expect("Should result in a valid regex"));
+
+        let filtered_lines = filter.filter(&lines).expect("Result should've been filtered");
+
+        assert_eq!(filtered_lines, expected_lines);
+        assert_ne!(filtered_lines, lines);
+    }
+
+    #[test]
+    pub fn test_filter_regex_casesensitive() {
+        let lines = vec![
+            String::from("This is a line, it shouldn't match the filter"),
+            String::from("This is a line which should match the filter."),
+            String::from("This is a line Which shouldn't match the filter."),
+            String::from("Another line which the filter should match."),
+        ];
+
+        let expected_lines = vec![
+            String::from("This is a line which should match the filter."),
+            String::from("Another line which the filter should match."),
+        ];
+
+        let mut filter = Filter {
+            filter: true,
+            search: Search {
+                changed: false,
+                regex: None,
+                string: String::from(r#"(which|should\b)"#),
+                is_regex: true,
+                case_insensitive: false,
+            },
+            changed: false,
+        };
+
+        filter.search.regex = Some(filter.search.create_regex().expect("Should result in a valid regex"));
+
+        let filtered_lines = filter.filter(&lines).expect("Result should've been filtered");
+
+        assert_eq!(filtered_lines, expected_lines);
+        assert_ne!(filtered_lines, lines);
+    }
+}
